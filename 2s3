@@ -15,12 +15,15 @@ from cStringIO import StringIO
 import click
 from humanfriendly import parse_size
 
-def upload(bucket, s3object, profile, host, insecure, size, time, debug):
+def upload(bucket, s3object, profile, host, insecure, ordinary, size, time, debug):
 
     # Establish connection to S3
     try:
-        calling_format = boto.config.get(
-            's3', 'calling_format', 'boto.s3.connection.OrdinaryCallingFormat')
+        if ordinary:
+            calling_format = boto.config.get(
+                's3', 'calling_format', 'boto.s3.connection.OrdinaryCallingFormat')
+        else:
+            calling_format = None
         s3_connection = boto.connect_s3(
             profile_name=profile,
             host=host,
@@ -119,16 +122,17 @@ CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 @click.argument("bucket")#, help="Name of the target bucket.")
 @click.argument("s3object", metavar='OBJECT')#, help="Name of the target object.")
 @click.option("-p", "--profile", metavar='PROFILE', default=None, help="Amazon profile (configure in ~/.aws/...)")
-@click.option("-H", "--host", metavar='HOST', default=None, help="Hostname or IP of the AWS endpoint.")
-@click.option("-i", "--insecure", is_flag=True, help="Insecure HTTP connection.")
+@click.option("-H", "--host", metavar='HOST', default=None, help="Hostname or IP of the AWS endpoint")
+@click.option("-i", "--insecure", is_flag=True, help="Insecure HTTP connection")
+@click.option("-o", "--ordinary", is_flag=True, help="Use ordinary calling format instead of subdomain calling format")
 @click.option("-s", "--size", metavar='SIZE', default='5MB', show_default=True, help="Split upload in CHUNK_SIZE")
-@click.option("-t", "--time", metavar='TIME', default=5, show_default=True, help="Time in seconds to wait until retry upload a failed part again. Default is 5.")
+@click.option("-t", "--time", metavar='TIME', default=5, show_default=True, help="Time in seconds to wait until retry upload a failed part again. Default is 5")
 @click.option("-d", "--debug", is_flag=True, help="Print debug information")
-def main(bucket, s3object, profile, host, insecure, size, time, debug):
+def main(bucket, s3object, profile, host, insecure, ordinary, size, time, debug):
     """
     Send data from standard input to OBJECT in your S3 or S3-like BUCKET
     """
-    upload(bucket, s3object, profile, host, insecure, parse_size(size), time, debug)
+    upload(bucket, s3object, profile, host, insecure, ordinary, parse_size(size), time, debug)
 
 if __name__ == '__main__':
     main()
