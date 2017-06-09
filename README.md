@@ -2,7 +2,7 @@
 Perform multipart upload to Amazon S3 of data read from stdin.
 
 ## Example
-Example: `tar -C / -cpjO /home | 2s3 com-example-backup home.tar.bz2`
+`tar -C / -cpjO /home | 2s3 com-example-backup home.tar.bz2`
 
 ## Usage
 ```
