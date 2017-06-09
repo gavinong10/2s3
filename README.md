@@ -1,8 +1,10 @@
 ## Summary
 Perform multipart upload to Amazon S3 of data read from stdin.
-## Example
-Example: tar -C / -cpjO /home | 2s3 com-example-backup home.tar.bz2
 
+## Example
+Example: `tar -C / -cpjO /home | 2s3 com-example-backup home.tar.bz2`
+
+## Usage
 ```
 Usage: 2s3 [OPTIONS] BUCKET OBJECT
 
