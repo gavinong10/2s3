@@ -5,7 +5,8 @@
 # Example usage:
 #     tar -C / -cpjO /home | 2s3 -k aws.key -b com-example-backup -o home.tar.bz2
 
-import boto
+import boto3
+import botocore
 import sys
 import time
 import traceback
@@ -15,55 +16,67 @@ from cStringIO import StringIO
 import click
 from humanfriendly import parse_size
 
-def upload(bucket, s3object, profile, host, insecure, ordinary, size, time, debug):
+# TODO: Do the ordinary version
 
+def check_bucket_available(s3, bucket):
+    returned_bucket = s3.Bucket(bucket)
+    return bool(returned_bucket)
+
+def check_object_name_available(s3, bucket, s3object):
+    try:
+        s3.Bucket(bucket).Object(s3object).load()
+        raise Exception("Key already exists!")
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == "404":
+            return True
+        else:
+            raise
+
+def compare_etag(s3, bucket, s3object, uploadHash, uploadPart, debug):
+    if debug:
+        checksum_remote = s3.Bucket(bucket).Object(s3object).e_tag.strip('"')
+        checksum_local  = uploadHash.hexdigest()+"-"+str(uploadPart)
+        print("Printing Checksums. NOTE: These values may not match as \
+        the AWS S3 spec describes these values as opaque strings.\n")
+        print("Checksum Local is: " + checksum_local)
+        print("Checksum Remote is: " + checksum_remote)
+
+def upload(bucket, s3object, profile, host, insecure, size, time_wait, debug):
+    if debug:
+        boto3.set_stream_logger('boto')
     # Establish connection to S3
     try:
-        if ordinary:
-            calling_format = boto.config.get(
-                's3', 'calling_format', 'boto.s3.connection.OrdinaryCallingFormat')
-        else:
-            calling_format = None
-        s3_connection = boto.connect_s3(
-            profile_name=profile,
-            host=host,
-            is_secure=not insecure,
-            calling_format=calling_format)
+        # if ordinary:
+        #     calling_format = boto.config.get(
+        #         's3', 'calling_format', 'boto.s3.connection.OrdinaryCallingFormat')
+        # else:
+        #     calling_format = None
+        session = boto3.session.Session(profile_name=profile)
+        s3 = session.resource('s3', endpoint_url=host,use_ssl=not insecure)
+        client = session.client('s3', endpoint_url=host,use_ssl=not insecure)
+        
+        
     except:
         print "Error: Connection to S3 could not be established."
         if debug:
             print traceback.format_exc()
         sys.exit(4)
 
-    # Check if the bucket is available
-    try:
-        s3_bucket     = s3_connection.lookup(bucket)
-        if not s3_bucket:
-            raise Exception('BucketLookupFailed')
-    except:
-        print "Error: Bucket %s is not available." % bucket
-        if debug:
-            print traceback.format_exc()
-        sys.exit(5)
+    check_bucket_available(s3, bucket)
 
-    if s3_bucket.get_key(s3object):
-        print "Error: Object %s exists in bucket %s." % (s3object, bucket)
-        sys.exit(6)
+    check_object_name_available(s3, bucket, s3object)
 
     # Initiate the upload
-    try:
-        s3_upload     = s3_bucket.initiate_multipart_upload(s3object)
-    except:
-        print "Error: Multipart upload could not be initiated."
-        if debug:
-            print traceback.format_exc()
-        sys.exit(7)
+    mp = client.create_multipart_upload(Bucket=bucket, Key=s3object)
+    uid = mp['UploadId']
 
     # Read size bytes from stdin and upload it as a multipart to S3.
     # The md5sum of each part is calculated, and the md5sum of the concatinated
     # checksums of each part is calculated on the way to verify the files
     # integrity after upload by comparing calculated checksum with
     # eTag of uploaded object.
+
+    parts = []
 
     uploadPart = 0
     uploadHash = hashlib.md5()
@@ -85,35 +98,34 @@ def upload(bucket, s3object, profile, host, insecure, ordinary, size, time, debu
             try:
                 uploadPartTry+=1
                 print ("Upload part %010d - %"+printByteLength+"d Bytes - %s - Try %d") % (uploadPart,len(bytes),uploadPartHash.hexdigest(),uploadPartTry)
-                s3_upload.upload_part_from_file(StringIO(bytes),uploadPart)
+                part = client.upload_part(Bucket=bucket, Key=s3object, PartNumber=uploadPart,
+                       UploadId=mp['UploadId'], Body=bytes)
+
                 break
             except:
-                print "Error uploading part. Try again in %d seconds..." % time
+                print "Error uploading part. Try again in %d seconds..." % time_wait
                 if debug:
                     print traceback.format_exc()
-                time.sleep(time)
-
+                time.sleep(time_wait)
+        parts.append({'PartNumber': uploadPart, 'ETag': part['ETag']})
 
     # Complete upload and check integrity
-    try:
-        s3_upload.complete_upload()
+    part_info = {
+        'Parts': parts
+    }
+    try: 
+        if debug:
+            print("Part Info: ", part_info)
+        client.complete_multipart_upload(Bucket=bucket, Key=s3object, UploadId=mp['UploadId'], MultipartUpload=part_info)
 
-        # Compare the eTag of the uploaded object with the localy calculated md5sum.
-        checksum_remote = s3_bucket.get_key(s3object).etag.strip('"')
-        checksum_local  = uploadHash.hexdigest()+"-"+str(uploadPart)
-        if checksum_remote <> checksum_local:
-            print "Error: Local checksum differs from object's eTag:"
-            print "Local : %s" % checksum_local
-            print "Remote: %s" % checksum_remote
-            print "The upload might be corrupt."
-            raise Exception('ChecksumMismatch')
-
-        print "Upload completed"
+        compare_etag(s3, bucket, s3object, uploadHash, uploadPart, debug)
+        
     except:
         print "Error: Error while completing upload."
         if debug:
             print traceback.format_exc()
-        sys.exit(8)
+        sys.exit(8)   
+
 
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
@@ -124,15 +136,15 @@ CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 @click.option("-p", "--profile", metavar='PROFILE', default=None, help="Amazon profile (configure in ~/.aws/...)")
 @click.option("-H", "--host", metavar='HOST', default=None, help="Hostname or IP of the AWS endpoint")
 @click.option("-i", "--insecure", is_flag=True, help="Insecure HTTP connection")
-@click.option("-o", "--ordinary", is_flag=True, help="Use ordinary calling format instead of subdomain calling format")
+# @click.option("-o", "--ordinary", is_flag=True, help="Use ordinary calling format instead of subdomain calling format")
 @click.option("-s", "--size", metavar='SIZE', default='5MB', show_default=True, help="Split upload in CHUNK_SIZE")
 @click.option("-t", "--time", metavar='TIME', default=5, show_default=True, help="Time in seconds to wait until retry upload a failed part again. Default is 5")
 @click.option("-d", "--debug", is_flag=True, help="Print debug information")
-def main(bucket, s3object, profile, host, insecure, ordinary, size, time, debug):
+def main(bucket, s3object, profile, host, insecure, size, time, debug):
     """
     Send data from standard input to OBJECT in your S3 or S3-like BUCKET
     """
-    upload(bucket, s3object, profile, host, insecure, ordinary, parse_size(size), time, debug)
+    upload(bucket, s3object, profile, host, insecure, parse_size(size), time, debug)
 
 if __name__ == '__main__':
     main()
